@@ -7,6 +7,16 @@ import (
 	"github.com/aluiziolira/go-scrape-books/models"
 )
 
+// ratingWordToValue maps textual rating descriptors to their numeric values.
+var ratingWordToValue = map[string]int{
+	"Zero":  0,
+	"One":   1,
+	"Two":   2,
+	"Three": 3,
+	"Four":  4,
+	"Five":  5,
+}
+
 // ValidateBook ensures the scraper captured the required fields.
 func ValidateBook(b *models.Book) error {
 	if b == nil {
@@ -38,20 +48,9 @@ func NormalizeAvailability(text string) string {
 
 // RatingToNumeric converts the textual rating to a numeric scale.
 func RatingToNumeric(rating string) int {
-	switch strings.TrimSpace(rating) {
-	case "Zero":
-		return 0
-	case "One":
-		return 1
-	case "Two":
-		return 2
-	case "Three":
-		return 3
-	case "Four":
-		return 4
-	case "Five":
-		return 5
-	default:
-		return 0
+	normalized := strings.TrimSpace(rating)
+	if v, ok := ratingWordToValue[normalized]; ok {
+		return v
 	}
+	return 0
 }
