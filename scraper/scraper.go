@@ -151,7 +151,7 @@ func (s *Scraper) configureHandlers(p *pipeline.Pipeline) {
 			if book == nil {
 				return
 			}
-			if err := p.Process([]*models.Book{book}); err != nil && err != pipeline.ErrPipelineClosed {
+			if err := p.Process(book); err != nil && err != pipeline.ErrPipelineClosed {
 				log.Printf("pipeline process error: %v", err)
 			}
 		})
@@ -276,14 +276,15 @@ func (rm *retryManager) Schedule(url string) bool {
 	}
 
 	rm.mu.Lock()
-	defer rm.mu.Unlock()
 
 	if rm.stopped {
+		rm.mu.Unlock()
 		return false
 	}
 
 	attempt := rm.attempts[url]
 	if attempt >= rm.cfg.MaxRetries {
+		rm.mu.Unlock()
 		return false
 	}
 
@@ -292,10 +293,11 @@ func (rm *retryManager) Schedule(url string) bool {
 	rm.totalRetries++
 
 	delay := rm.backoff(attempt)
-	rm.resetTimer(url)
+	rm.resetTimerLocked(url)
 	rm.timers[url] = time.AfterFunc(delay, func() {
-		rm.collector.Visit(url)
+		rm.fireRetry(url)
 	})
+	rm.mu.Unlock()
 	return true
 }
 
@@ -316,10 +318,28 @@ func (rm *retryManager) backoff(attempt int) time.Duration {
 	return delay
 }
 
-func (rm *retryManager) resetTimer(url string) {
+func (rm *retryManager) resetTimerLocked(url string) {
 	if timer, ok := rm.timers[url]; ok {
 		timer.Stop()
+		delete(rm.timers, url)
 	}
+}
+
+func (rm *retryManager) fireRetry(url string) {
+	rm.mu.Lock()
+	if rm.stopped {
+		rm.mu.Unlock()
+		return
+	}
+	rm.mu.Unlock()
+
+	if err := rm.collector.Visit(url); err != nil && rm.cfg.Verbose {
+		log.Printf("retry visit failed (%s): %v", url, err)
+	}
+
+	rm.mu.Lock()
+	delete(rm.timers, url)
+	rm.mu.Unlock()
 }
 
 func (rm *retryManager) Stop() {

@@ -77,7 +77,7 @@ func (p *Pipeline) Start(workers int) {
 }
 
 // Process enqueues books for downstream processing.
-func (p *Pipeline) Process(books []*models.Book) error {
+func (p *Pipeline) Process(books ...*models.Book) error {
 	if len(books) == 0 {
 		return nil
 	}
