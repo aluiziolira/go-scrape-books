@@ -1,0 +1,36 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.out
+
+# Output files
+books.csv
+books.json
+*.csv
+*.json
+
+# Scraper output directory
+output/
+!output/.gitkeep
+
+# Local Go caches
+.gomodcache/
+.gopath/
+.gocache/
+
+# Go workspace
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
