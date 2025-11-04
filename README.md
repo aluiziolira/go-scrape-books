@@ -28,7 +28,7 @@ make run
 make run ARGS="-pages 20 -parallel 8"
 ```
 
-With the defaults the scraper captures 50 catalog pages (~1000 books) in roughly 9–10 seconds on a modern laptop (≈100 items/second). Increase `-parallel` for higher throughput, but be mindful of the demo site's rate limits.
+With the defaults the scraper captures 50 catalog pages (~1000 books) quickly; adjust `-parallel` for higher throughput, but be mindful of the demo site's rate limits.
 
 ## Sample Log Excerpt
 
@@ -45,6 +45,20 @@ Scrape complete
   Items/sec:     108.34
   Output file:   output/books.csv
 --------------------------------------------------
+```
+
+## Sample Output
+
+```text
+title,price,rating,rating_numeric,availability,image_url,url,scraped_at
+Soumission,50.10,One,1,In stock,https://books.toscrape.com/media/cache/3e/ef/3eef99c9d9adef34639f510662022830.jpg,https://books.toscrape.com/catalogue/soumission_998/index.html,2025-11-04T13:09:13Z
+It's Only the Himalayas,45.17,Two,2,In stock,https://books.toscrape.com/media/cache/27/a5/27a53d0bb95bdd88288eaf66c9230d7e.jpg,https://books.toscrape.com/catalogue/its-only-the-himalayas_981/index.html,2025-11-04T13:09:13Z
+```
+
+```json
+{"title":"Soumission","price":"50.10","rating":"One","rating_numeric":1,"availability":"In stock","image_url":"https://books.toscrape.com/media/cache/3e/ef/3eef99c9d9adef34639f510662022830.jpg","url":"https://books.toscrape.com/catalogue/soumission_998/index.html","scraped_at":"2025-11-04T13:09:13.103170645Z"}
+{"title":"It's Only the Himalayas","price":"45.17","rating":"Two","rating_numeric":2,"availability":"In stock","image_url":"https://books.toscrape.com/media/cache/27/a5/27a53d0bb95bdd88288eaf66c9230d7e.jpg","url":"https://books.toscrape.com/catalogue/its-only-the-himalayas_981/index.html","scraped_at":"2025-11-04T13:09:13.103335404Z"}
+{"title":"Penny Maybe","price":"33.29","rating":"Three","rating_numeric":3,"availability":"In stock","image_url":"https://books.toscrape.com/media/cache/12/53/1253c21c5ef3c6d075c5fa3f5fecee6a.jpg","url":"https://books.toscrape.com/catalogue/penny-maybe_965/index.html","scraped_at":"2025-11-04T13:09:13.271742395Z"}
 ```
 
 ## Testing
