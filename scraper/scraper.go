@@ -1,8 +1,10 @@
 package scraper
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +24,7 @@ type Scraper struct {
 	cfg       *config.Config
 	collector *colly.Collector
 	retry     *retryManager
+	Metrics   *Metrics
 
 	requestCount int64
 	pageCount    int64
@@ -76,16 +79,33 @@ func NewScraper(cfg *config.Config) (*Scraper, error) {
 		cfg:          cfg,
 		collector:    collector,
 		errorsByType: make(map[string]int),
+		Metrics:      NewMetrics(),
 	}
-	s.retry = newRetryManager(collector, cfg)
+	s.retry = newRetryManager(collector, cfg, s.Metrics)
 	return s, nil
 }
 
-// Scrape starts the crawl and streams items through the pipeline.
-func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
-	s.configureHandlers(p)
+// Run starts the crawl and streams items through the pipeline.
+func (s *Scraper) Run(ctx context.Context, p *pipeline.Pipeline) (*models.ScraperResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.retry.SetContext(ctx)
+	s.configureHandlers(ctx, p)
 
 	start := time.Now()
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.collector.Wait()
+			s.retry.Stop()
+		case <-done:
+		}
+	}()
+
 	if err := s.collector.Visit(s.cfg.BaseURL); err != nil {
 		return nil, fmt.Errorf("initial visit: %w", err)
 	}
@@ -100,6 +120,8 @@ func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
 		FailedURLs:   s.snapshotFailedURLs(),
 		ErrorsByType: s.snapshotErrors(),
 		RetryCount:   s.retry.TotalRetries(),
+		RequestCount: int(atomic.LoadInt64(&s.requestCount)),
+		PageCount:    int(atomic.LoadInt64(&s.pageCount)),
 	}
 
 	if metrics := p.GetMetrics(); metrics != nil {
@@ -111,32 +133,66 @@ func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
 	return result, nil
 }
 
-func (s *Scraper) configureHandlers(p *pipeline.Pipeline) {
+// Scrape is a compatibility wrapper for older callers.
+func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
+	return s.Run(context.Background(), p)
+}
+
+func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 	s.handlersOnce.Do(func() {
 		s.collector.OnRequest(func(r *colly.Request) {
+			r.Ctx.Put("start", time.Now())
 			current := atomic.AddInt64(&s.requestCount, 1)
-			if s.cfg.Verbose && current%50 == 0 {
-				log.Printf("requests=%d pages=%d url=%s", current, atomic.LoadInt64(&s.pageCount), r.URL)
+			if s.Metrics != nil {
+				s.Metrics.IncRequest("started")
+			}
+			if current%50 == 0 {
+				slog.Debug("scraper request progress",
+					slog.Int64("requests", current),
+					slog.Int64("pages", atomic.LoadInt64(&s.pageCount)),
+					slog.String("url", r.URL.String()),
+				)
 			}
 		})
 
 		s.collector.OnResponse(func(r *colly.Response) {
 			if r.StatusCode >= http.StatusBadRequest {
-				log.Printf("non-200 response (%d): %s", r.StatusCode, r.Request.URL)
+				slog.Error("non-200 response",
+					slog.Int("status", r.StatusCode),
+					slog.String("url", r.Request.URL.String()),
+				)
+			}
+			if s.Metrics != nil {
+				if start, ok := r.Request.Ctx.GetAny("start").(time.Time); ok {
+					s.Metrics.ObserveDuration(time.Since(start))
+				}
 			}
 		})
 
 		s.collector.OnError(func(r *colly.Response, err error) {
 			atomic.AddInt64(&s.errorCount, 1)
-			category := classifyError(err)
+			statusCode := 0
+			if r != nil {
+				statusCode = r.StatusCode
+			}
+			classified := classifyError(err, statusCode)
+			category := errorTypeLabel(classified)
 
 			s.mu.Lock()
 			s.errorsByType[category]++
 			s.mu.Unlock()
 
-			url := r.Request.URL.String()
-			if s.cfg.Verbose {
-				log.Printf("request error (%s): %v", url, err)
+			url := ""
+			if r != nil && r.Request != nil && r.Request.URL != nil {
+				url = r.Request.URL.String()
+			}
+			slog.Error("request error",
+				slog.String("url", url),
+				slog.String("category", category),
+				slog.Any("error", err),
+			)
+			if s.Metrics != nil {
+				s.Metrics.IncError(category)
 			}
 
 			if !s.retry.Schedule(url) {
@@ -151,14 +207,20 @@ func (s *Scraper) configureHandlers(p *pipeline.Pipeline) {
 			if book == nil {
 				return
 			}
+			if s.Metrics != nil {
+				s.Metrics.IncItems()
+			}
 			if err := p.Process(book); err != nil && err != pipeline.ErrPipelineClosed {
-				log.Printf("pipeline process error: %v", err)
+				slog.Error("pipeline process error", slog.Any("error", err))
 			}
 		})
 
 		s.collector.OnHTML("li.next a", func(e *colly.HTMLElement) {
 			currentPage := atomic.AddInt64(&s.pageCount, 1)
 			if currentPage >= int64(s.cfg.MaxPages) {
+				return
+			}
+			if ctx.Err() != nil {
 				return
 			}
 			link := e.Attr("href")
@@ -227,32 +289,49 @@ func (s *Scraper) snapshotErrors() map[string]int {
 	return out
 }
 
-func classifyError(err error) string {
+func classifyError(err error, statusCode int) error {
+	if err == nil && statusCode == 0 {
+		return nil
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrTimeout{Err: err}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return ErrTimeout{Err: err}
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return ErrConnection{Err: err}
+	}
+
+	if statusCode != 0 {
+		wrapped := err
+		if wrapped == nil {
+			wrapped = fmt.Errorf("http status %d", statusCode)
+		}
+		switch statusCode {
+		case http.StatusForbidden:
+			return ErrForbidden{Err: wrapped}
+		case http.StatusNotFound:
+			return ErrNotFound{Err: wrapped}
+		case http.StatusTooManyRequests:
+			return ErrRateLimited{Err: wrapped}
+		}
+	}
+
 	if err == nil {
-		return "unknown"
+		return nil
 	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "timeout"):
-		return "timeout"
-	case strings.Contains(msg, "connection"):
-		return "connection"
-	case strings.Contains(msg, "refused"):
-		return "refused"
-	case strings.Contains(msg, "EOF"):
-		return "eof"
-	case strings.Contains(msg, "403"):
-		return "forbidden"
-	case strings.Contains(msg, "404"):
-		return "not_found"
-	default:
-		return "other"
-	}
+	return err
 }
 
 type retryManager struct {
 	collector *colly.Collector
 	cfg       *config.Config
+	metrics   *Metrics
+	ctx       context.Context
 
 	mu           sync.Mutex
 	attempts     map[string]int
@@ -261,12 +340,14 @@ type retryManager struct {
 	stopped      bool
 }
 
-func newRetryManager(collector *colly.Collector, cfg *config.Config) *retryManager {
+func newRetryManager(collector *colly.Collector, cfg *config.Config, metrics *Metrics) *retryManager {
 	return &retryManager{
 		collector: collector,
 		cfg:       cfg,
 		attempts:  make(map[string]int),
 		timers:    make(map[string]*time.Timer),
+		metrics:   metrics,
+		ctx:       context.Background(),
 	}
 }
 
@@ -275,9 +356,21 @@ func (rm *retryManager) Schedule(url string) bool {
 		return false
 	}
 
+	if rm.ctx != nil {
+		select {
+		case <-rm.ctx.Done():
+			return false
+		default:
+		}
+	}
+
 	rm.mu.Lock()
 
 	if rm.stopped {
+		rm.mu.Unlock()
+		return false
+	}
+	if rm.ctx != nil && rm.ctx.Err() != nil {
 		rm.mu.Unlock()
 		return false
 	}
@@ -291,6 +384,9 @@ func (rm *retryManager) Schedule(url string) bool {
 	attempt++
 	rm.attempts[url] = attempt
 	rm.totalRetries++
+	if rm.metrics != nil {
+		rm.metrics.IncRetries()
+	}
 
 	delay := rm.backoff(attempt)
 	rm.resetTimerLocked(url)
@@ -331,10 +427,14 @@ func (rm *retryManager) fireRetry(url string) {
 		rm.mu.Unlock()
 		return
 	}
+	ctx := rm.ctx
 	rm.mu.Unlock()
 
-	if err := rm.collector.Visit(url); err != nil && rm.cfg.Verbose {
-		log.Printf("retry visit failed (%s): %v", url, err)
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	if err := rm.collector.Visit(url); err != nil {
+		slog.Debug("retry visit failed", slog.String("url", url), slog.Any("error", err))
 	}
 
 	rm.mu.Lock()
@@ -361,4 +461,14 @@ func (rm *retryManager) TotalRetries() int {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	return rm.totalRetries
+}
+
+func (rm *retryManager) SetContext(ctx context.Context) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	if ctx == nil {
+		rm.ctx = context.Background()
+		return
+	}
+	rm.ctx = ctx
 }
