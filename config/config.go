@@ -104,14 +104,14 @@ func (c *Config) Validate() error {
 	if c.UserAgent == "" {
 		return fmt.Errorf("user agent cannot be empty")
 	}
-	if c.PipelineBufferSize <= 0 {
-		return fmt.Errorf("pipeline buffer size must be positive")
+	if c.PipelineBufferSize < 0 {
+		return fmt.Errorf("pipeline buffer size must be >= 0")
 	}
-	if c.BatchSize <= 0 {
-		return fmt.Errorf("batch size must be positive")
+	if c.BatchSize < 0 {
+		return fmt.Errorf("batch size must be >= 0")
 	}
-	if c.DedupeMaxSize <= 0 {
-		return fmt.Errorf("dedupe max size must be positive")
+	if c.DedupeMaxSize < 0 {
+		return fmt.Errorf("dedupe max size must be >= 0")
 	}
 
 	return nil

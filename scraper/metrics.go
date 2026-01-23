@@ -25,7 +25,7 @@ func NewMetrics() *Metrics {
 			Name: "scraper_requests_total",
 			Help: "Total HTTP requests issued by the scraper.",
 		},
-		[]string{"status"},
+		[]string{"phase"},
 	)
 	requestDuration := prometheus.NewHistogram(
 		prometheus.HistogramOpts{
@@ -67,11 +67,11 @@ func NewMetrics() *Metrics {
 }
 
 // IncRequest increments the requests total counter.
-func (m *Metrics) IncRequest(status string) {
+func (m *Metrics) IncRequest(phase string) {
 	if m == nil {
 		return
 	}
-	m.RequestsTotal.WithLabelValues(status).Inc()
+	m.RequestsTotal.WithLabelValues(phase).Inc()
 }
 
 // ObserveDuration records an HTTP request duration.

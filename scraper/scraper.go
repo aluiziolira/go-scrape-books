@@ -163,6 +163,11 @@ func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 				)
 			}
 			if s.Metrics != nil {
+				if r.StatusCode < http.StatusBadRequest {
+					s.Metrics.IncRequest("success")
+				} else {
+					s.Metrics.IncRequest("error")
+				}
 				if start, ok := r.Request.Ctx.GetAny("start").(time.Time); ok {
 					s.Metrics.ObserveDuration(time.Since(start))
 				}
@@ -192,6 +197,9 @@ func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 				slog.Any("error", err),
 			)
 			if s.Metrics != nil {
+				if r == nil || r.StatusCode == 0 {
+					s.Metrics.IncRequest("error")
+				}
 				s.Metrics.IncError(category)
 			}
 
