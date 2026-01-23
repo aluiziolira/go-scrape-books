@@ -225,7 +225,9 @@ func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 			}
 			link := e.Attr("href")
 			abs := e.Request.AbsoluteURL(link)
-			s.collector.Visit(abs)
+			if err := s.collector.Visit(abs); err != nil {
+				slog.Debug("visit failed", slog.String("url", abs), slog.Any("error", err))
+			}
 		})
 	})
 }

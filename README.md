@@ -1,5 +1,5 @@
 # Go Books Scraper: Production-Grade Streaming ETL
-Production-grade streaming ETL processing 2.2M items/sec with bounded memory and zero-allocation pipelines.
+Production-grade streaming ETL processing 2.2M items/sec with bounded memory and low-allocation pipelines.
 
 ![Go](https://img.shields.io/badge/Go-1.25%2B-blue)
 ![CI](https://github.com/aluiziolira/go-scrape-books/actions/workflows/ci.yml/badge.svg)
@@ -8,7 +8,7 @@ Production-grade streaming ETL processing 2.2M items/sec with bounded memory and
 A high-throughput, bounded-memory web scraper engineered in Go. This project demonstrates how to architect a production-ready data pipeline that balances concurrency, backpressure, and observability to scrape [books.toscrape.com](https://books.toscrape.com) reliably at scale.
 
 **Core Strategies:**
-- **Streaming Pipeline:** Zero-allocation data flow from ingestion to disk using buffered channels.
+- **Streaming Pipeline:** Low-allocation data flow from ingestion to disk using buffered channels.
 - **Resiliency:** Custom retry manager with exponential backoff and typed error handling.
 - **Bounded Concurrency:** Worker pools with strict rate limiting to respect target infrastructure.
 - **Dual Output:** Simultaneous CSV and JSONL (newline-delimited JSON) for maximum compatibility.
