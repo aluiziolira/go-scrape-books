@@ -3,44 +3,54 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"os"
+	"strconv"
 	"time"
 )
 
 // Config holds scraper configuration.
 type Config struct {
-	BaseURL          string
-	MaxPages         int
-	Parallelism      int
-	Delay            time.Duration
-	RandomDelay      time.Duration
-	Timeout          time.Duration
-	MaxRetries       int
-	RetryBackoff     time.Duration
-	RetryBackoffMax  time.Duration
-	OutputFile       string
-	OutputFormat     string // csv, json, or dual
-	UserAgent        string
-	Verbose          bool
-	RespectRobotsTxt bool
+	BaseURL            string
+	MaxPages           int
+	Parallelism        int
+	Delay              time.Duration
+	RandomDelay        time.Duration
+	Timeout            time.Duration
+	MaxRetries         int
+	RetryBackoff       time.Duration
+	RetryBackoffMax    time.Duration
+	OutputFile         string
+	OutputFormat       string // csv, json, or dual
+	UserAgent          string
+	Verbose            bool
+	RespectRobotsTxt   bool
+	PipelineBufferSize int
+	BatchSize          int
+	DedupeMaxSize      int
+	MetricsAddr        string
 }
 
 // DefaultConfig returns conservative defaults for the demo target.
 func DefaultConfig() *Config {
 	return &Config{
-		BaseURL:          "https://books.toscrape.com",
-		MaxPages:         50,
-		Parallelism:      16,
-		Delay:            0,
-		RandomDelay:      0,
-		Timeout:          10 * time.Second,
-		MaxRetries:       2,
-		RetryBackoff:     200 * time.Millisecond,
-		RetryBackoffMax:  2 * time.Second,
-		OutputFile:       "output/books.csv",
-		OutputFormat:     "csv",
-		UserAgent:        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
-		Verbose:          false,
-		RespectRobotsTxt: false,
+		BaseURL:            "https://books.toscrape.com",
+		MaxPages:           50,
+		Parallelism:        16,
+		Delay:              0,
+		RandomDelay:        0,
+		Timeout:            10 * time.Second,
+		MaxRetries:         2,
+		RetryBackoff:       200 * time.Millisecond,
+		RetryBackoffMax:    2 * time.Second,
+		OutputFile:         "output/books.csv",
+		OutputFormat:       "csv",
+		UserAgent:          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+		Verbose:            false,
+		RespectRobotsTxt:   false,
+		PipelineBufferSize: 512,
+		BatchSize:          64,
+		DedupeMaxSize:      100000,
+		MetricsAddr:        "",
 	}
 }
 
@@ -94,6 +104,34 @@ func (c *Config) Validate() error {
 	if c.UserAgent == "" {
 		return fmt.Errorf("user agent cannot be empty")
 	}
+	if c.PipelineBufferSize <= 0 {
+		return fmt.Errorf("pipeline buffer size must be positive")
+	}
+	if c.BatchSize <= 0 {
+		return fmt.Errorf("batch size must be positive")
+	}
+	if c.DedupeMaxSize <= 0 {
+		return fmt.Errorf("dedupe max size must be positive")
+	}
 
 	return nil
+}
+
+// EnvInt looks up an integer environment variable.
+func EnvInt(key string) (int, bool, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return 0, false, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, true, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	return parsed, true, nil
+}
+
+// EnvString looks up a string environment variable.
+func EnvString(key string) (string, bool) {
+	value, ok := os.LookupEnv(key)
+	return value, ok
 }

@@ -1,19 +1,25 @@
 package pipeline
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/aluiziolira/go-scrape-books/config"
 	"github.com/aluiziolira/go-scrape-books/models"
 	"github.com/aluiziolira/go-scrape-books/parser"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
 	// ErrPipelineClosed is returned when Process is called after shutdown.
-	ErrPipelineClosed = errors.New("pipeline: closed")
+	ErrPipelineClosed       = errors.New("pipeline: closed")
+	ErrPipelineCloseTimeout = errors.New("pipeline: close timeout")
+
+	drainTimeout = 30 * time.Second
 )
 
 // OutputWriter defines the interface for data output.
@@ -25,14 +31,18 @@ type OutputWriter interface {
 
 // Pipeline coordinates validation, de-duplication, and output writing.
 type Pipeline struct {
+	ctx context.Context
+
 	writer    OutputWriter
 	bookCh    chan *models.Book
 	batchSize int
 
 	wg sync.WaitGroup
 
-	seen   map[string]struct{}
-	seenMu sync.Mutex
+	seen          *lru.Cache[string, struct{}]
+	seenMu        sync.Mutex
+	dedupeMaxSize int
+	dedupeWarned  bool
 
 	metrics metrics
 
@@ -46,14 +56,39 @@ type Pipeline struct {
 }
 
 // NewPipeline builds a pipeline with a modest in-memory buffer.
-func NewPipeline(writer OutputWriter) *Pipeline {
+func NewPipeline(ctx context.Context, writer OutputWriter, cfg *config.Config) *Pipeline {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	bufferSize := cfg.PipelineBufferSize
+	if bufferSize <= 0 {
+		bufferSize = 512
+	}
+	batchSize := cfg.BatchSize
+	if batchSize <= 0 {
+		batchSize = 64
+	}
+	dedupeMaxSize := cfg.DedupeMaxSize
+	if dedupeMaxSize <= 0 {
+		dedupeMaxSize = 100000
+	}
+
+	seen, err := lru.New[string, struct{}](dedupeMaxSize)
+	if err != nil {
+		seen, _ = lru.New[string, struct{}](1)
+	}
 	return &Pipeline{
-		writer:    writer,
-		bookCh:    make(chan *models.Book, 512),
-		batchSize: 64,
-		seen:      make(map[string]struct{}),
-		metrics:   newMetrics(),
-		shutdown:  make(chan struct{}),
+		ctx:           ctx,
+		writer:        writer,
+		bookCh:        make(chan *models.Book, bufferSize),
+		batchSize:     batchSize,
+		seen:          seen,
+		dedupeMaxSize: dedupeMaxSize,
+		metrics:       newMetrics(),
+		shutdown:      make(chan struct{}),
 	}
 }
 
@@ -114,7 +149,18 @@ func (p *Pipeline) Close() error {
 		close(p.bookCh)
 	})
 
-	p.wg.Wait()
+	waitCh := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(waitCh)
+	}()
+
+	select {
+	case <-waitCh:
+	case <-time.After(drainTimeout):
+		p.setErr(fmt.Errorf("%w after %s", ErrPipelineCloseTimeout, drainTimeout))
+		return p.Err()
+	}
 	return p.Err()
 }
 
@@ -146,7 +192,10 @@ func (p *Pipeline) StartMetricsReporting(interval time.Duration) {
 				metrics := p.GetMetrics()
 				processed := metrics["processed_books"].(int64)
 				validation := metrics["validation_errors"].(map[string]int)
-				log.Printf("pipeline: processed=%d validation_errors=%d", processed, len(validation))
+				slog.Debug("pipeline progress",
+					slog.Int64("processed", processed),
+					slog.Int("validation_errors", len(validation)),
+				)
 			case <-p.shutdown:
 				return
 			}
@@ -169,22 +218,32 @@ func (p *Pipeline) worker() {
 		return nil
 	}
 
-	for book := range p.bookCh {
-		prepared := p.prepare(book)
-		if prepared == nil {
-			continue
-		}
-		batch = append(batch, prepared)
-		if len(batch) >= p.batchSize {
+	for {
+		select {
+		case <-p.ctx.Done():
 			if err := flush(); err != nil {
 				p.setErr(fmt.Errorf("write batch: %w", err))
+			}
+			return
+		case book, ok := <-p.bookCh:
+			if !ok {
+				if err := flush(); err != nil {
+					p.setErr(fmt.Errorf("write batch: %w", err))
+				}
 				return
 			}
+			prepared := p.prepare(book)
+			if prepared == nil {
+				continue
+			}
+			batch = append(batch, prepared)
+			if len(batch) >= p.batchSize {
+				if err := flush(); err != nil {
+					p.setErr(fmt.Errorf("write batch: %w", err))
+					return
+				}
+			}
 		}
-	}
-
-	if err := flush(); err != nil {
-		p.setErr(fmt.Errorf("write batch: %w", err))
 	}
 }
 
@@ -195,12 +254,16 @@ func (p *Pipeline) prepare(book *models.Book) *models.Book {
 	}
 
 	p.seenMu.Lock()
-	if _, ok := p.seen[book.URL]; ok {
+	if _, ok := p.seen.Get(book.URL); ok {
 		p.seenMu.Unlock()
 		p.metrics.addValidation("duplicate_url")
 		return nil
 	}
-	p.seen[book.URL] = struct{}{}
+	evicted := p.seen.Add(book.URL, struct{}{})
+	if !p.dedupeWarned && (evicted || p.seen.Len() >= p.dedupeMaxSize) {
+		p.dedupeWarned = true
+		slog.Warn("dedupe cache at capacity", slog.Int("max_size", p.dedupeMaxSize))
+	}
 	p.seenMu.Unlock()
 
 	book.Price = parser.NormalizePrice(book.Price)
@@ -220,6 +283,8 @@ func (p *Pipeline) enqueue(book *models.Book) (err error) {
 
 	select {
 	case <-p.shutdown:
+		return ErrPipelineClosed
+	case <-p.ctx.Done():
 		return ErrPipelineClosed
 	case p.bookCh <- book:
 		return nil
