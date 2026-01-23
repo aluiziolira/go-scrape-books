@@ -55,7 +55,7 @@ Scrape complete
 ```mermaid
 flowchart LR
   CLI[CLI] --> Config[Config]
-  Config --> Scraper[Scraper (Colly)]
+  Config --> Scraper["Scraper (Colly)"]
   Scraper --> Retry[Retry Manager]
   Retry --> Scraper
   Scraper --> Pipeline[Pipeline]
