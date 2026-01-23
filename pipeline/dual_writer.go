@@ -2,6 +2,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -42,13 +43,18 @@ func (dw *DualWriter) Write(books []*models.Book) error {
 	defer dw.mu.Unlock()
 
 	// Write to CSV
+	var errs []error
 	if err := dw.csvWriter.Write(books); err != nil {
-		return fmt.Errorf("CSV write failed: %w", err)
+		errs = append(errs, fmt.Errorf("CSV write failed: %w", err))
 	}
 
 	// Write to JSON (JSONL format)
 	if err := dw.jsonWriter.Write(books); err != nil {
-		return fmt.Errorf("JSON write failed: %w", err)
+		errs = append(errs, fmt.Errorf("JSON write failed: %w", err))
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	return nil
@@ -73,6 +79,11 @@ func (dw *DualWriter) Close() error {
 		return fmt.Errorf("multiple errors: %v", errs)
 	}
 
+	return nil
+}
+
+// Rollback is a placeholder for future transactional support.
+func (dw *DualWriter) Rollback() error {
 	return nil
 }
 

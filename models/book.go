@@ -17,12 +17,14 @@ type Book struct {
 
 // ScraperResult holds the overall result of a scraping operation
 type ScraperResult struct {
-	Books       []*Book
-	StartTime   time.Time
-	EndTime     time.Time
-	TotalCount  int
-	ErrorCount  int
-	FailedURLs  []string
+	Books        []*Book
+	StartTime    time.Time
+	EndTime      time.Time
+	TotalCount   int
+	ErrorCount   int
+	FailedURLs   []string
 	ErrorsByType map[string]int
-	RetryCount  int
+	RetryCount   int
+	RequestCount int
+	PageCount    int
 }
