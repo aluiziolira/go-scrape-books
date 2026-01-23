@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.21 AS deps
+FROM golang:1.25 AS deps
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -19,6 +19,7 @@ WORKDIR /app
 COPY --from=build /out/scraper /app/scraper
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh && mkdir -p /app/output && chown -R scraper:scraper /app
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/bin/sh", "-c", "test -x /app/scraper"]
 USER scraper
 VOLUME ["/app/output"]
 ENTRYPOINT ["/entrypoint.sh"]
