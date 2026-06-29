@@ -172,7 +172,7 @@ func (p *Pipeline) Err() error {
 }
 
 // GetMetrics returns a snapshot of the internal counters.
-func (p *Pipeline) GetMetrics() map[string]interface{} {
+func (p *Pipeline) GetMetrics() PipelineStats {
 	return p.metrics.snapshot()
 }
 
@@ -190,8 +190,8 @@ func (p *Pipeline) StartMetricsReporting(interval time.Duration) {
 			select {
 			case <-ticker.C:
 				metrics := p.GetMetrics()
-				processed := metrics["processed_books"].(int64)
-				validation := metrics["validation_errors"].(map[string]int)
+				processed := metrics.Processed
+				validation := metrics.ValidationErrors
 				slog.Debug("pipeline progress",
 					slog.Int64("processed", processed),
 					slog.Int("validation_errors", len(validation)),
@@ -267,6 +267,12 @@ func (p *Pipeline) prepare(book *models.Book) *models.Book {
 	p.seenMu.Unlock()
 
 	book.Price = parser.NormalizePrice(book.Price)
+	priceNumeric, err := parser.ParsePrice(book.Price)
+	if err != nil {
+		p.metrics.addValidation("unparseable_price")
+	} else {
+		book.PriceNumeric = priceNumeric
+	}
 	book.Availability = parser.NormalizeAvailability(book.Availability)
 	book.RatingNumeric = parser.RatingToNumeric(book.RatingText)
 
@@ -323,6 +329,12 @@ func (p *Pipeline) signalShutdown() {
 	})
 }
 
+// PipelineStats is an immutable snapshot of pipeline progress.
+type PipelineStats struct {
+	Processed        int64
+	ValidationErrors map[string]int
+}
+
 type metrics struct {
 	mu         sync.Mutex
 	processed  int64
@@ -347,7 +359,7 @@ func (m *metrics) addValidation(kind string) {
 	m.mu.Unlock()
 }
 
-func (m *metrics) snapshot() map[string]interface{} {
+func (m *metrics) snapshot() PipelineStats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -356,8 +368,8 @@ func (m *metrics) snapshot() map[string]interface{} {
 		copyValidation[k] = v
 	}
 
-	return map[string]interface{}{
-		"processed_books":   m.processed,
-		"validation_errors": copyValidation,
+	return PipelineStats{
+		Processed:        m.processed,
+		ValidationErrors: copyValidation,
 	}
 }

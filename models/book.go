@@ -7,6 +7,7 @@ import "time"
 type Book struct {
 	Title         string    `csv:"title" json:"title"`
 	Price         string    `csv:"price" json:"price"`
+	PriceNumeric  float64   `csv:"price_numeric" json:"price_numeric"`
 	RatingText    string    `csv:"rating" json:"rating"`
 	RatingNumeric int       `csv:"rating_numeric" json:"rating_numeric"`
 	Availability  string    `csv:"availability" json:"availability"`
