@@ -49,7 +49,7 @@ func NewScraper(cfg *config.Config) (*Scraper, error) {
 
 	collector := colly.NewCollector(
 		colly.Async(true),
-		colly.AllowedDomains(parsed.Host),
+		colly.AllowedDomains(parsed.Hostname()),
 		colly.UserAgent(cfg.UserAgent),
 	)
 
