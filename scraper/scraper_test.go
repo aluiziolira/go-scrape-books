@@ -97,6 +97,7 @@ func TestScraperHTTPStatusClassification(t *testing.T) {
 			cfg.BaseURL = "http://example.test/"
 			cfg.MaxPages = 1
 			cfg.Parallelism = 1
+			cfg.RespectRobotsTxt = false
 			cfg.MaxRetries = 0
 			cfg.PipelineBufferSize = 16
 			cfg.BatchSize = 1
@@ -168,6 +169,7 @@ func (cw *collectingWriter) All() []*models.Book {
 func TestScraper_Integration(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.BaseURL = "http://example.test/"
+	cfg.RespectRobotsTxt = false
 	cfg.MaxPages = 3
 	cfg.Parallelism = 4
 	cfg.PipelineBufferSize = 128
