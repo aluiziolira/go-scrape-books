@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,32 +18,15 @@ import (
 	"github.com/aluiziolira/go-scrape-books/models"
 	"github.com/aluiziolira/go-scrape-books/pipeline"
 	"github.com/aluiziolira/go-scrape-books/scraper"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
-	defaultCfg := config.DefaultConfig()
-	pagesDefault := defaultCfg.MaxPages
-	if value, ok, err := config.EnvInt("SCRAPER_PAGES"); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid SCRAPER_PAGES: %v\n", err)
+	pagesDefault, parallelDefault, outputDefault, metricsDefault, err := flagDefaults()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
-	} else if ok {
-		pagesDefault = value
-	}
-	parallelDefault := defaultCfg.Parallelism
-	if value, ok, err := config.EnvInt("SCRAPER_PARALLEL"); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid SCRAPER_PARALLEL: %v\n", err)
-		os.Exit(1)
-	} else if ok {
-		parallelDefault = value
-	}
-	outputDefault := defaultCfg.OutputFile
-	if value, ok := config.EnvString("SCRAPER_OUTPUT"); ok {
-		outputDefault = value
-	}
-	metricsDefault := defaultCfg.MetricsAddr
-	if value, ok := config.EnvString("SCRAPER_METRICS_ADDR"); ok {
-		metricsDefault = value
 	}
 
 	maxPages := flag.Int("pages", pagesDefault, "Maximum catalog pages to scrape")
@@ -52,7 +36,7 @@ func main() {
 	maxRetries := flag.Int("max-retries", 2, "Maximum retry attempts per URL")
 	retryBackoffMs := flag.Int("retry-backoff", 200, "Initial retry backoff (milliseconds)")
 	retryBackoffMaxMs := flag.Int("retry-backoff-max", 2000, "Maximum retry backoff (milliseconds)")
-	respectRobots := flag.Bool("respect-robots", false, "Respect robots.txt directives")
+	respectRobots := flag.Bool("respect-robots", true, "Respect robots.txt directives (enabled by default; pass -respect-robots=false to disable)")
 	outputFile := flag.String("output", outputDefault, "Output file path")
 	outputFormat := flag.String("format", "csv", "Output format: csv, json, or dual")
 	verbose := flag.Bool("v", false, "Enable verbose logging")
@@ -71,6 +55,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	os.Exit(run(ctx, cfg, *outputFile))
+}
+
+// run executes the scrape and returns a process exit code.
+func run(ctx context.Context, cfg *config.Config, outputFile string) int {
+	logger, level := newLogger(cfg.Verbose)
+	slog.SetDefault(logger)
+	slog.SetLogLoggerLevel(level.Level())
+
 	slog.Info("starting scrape",
 		slog.String("base_url", cfg.BaseURL),
 		slog.Int("pages", cfg.MaxPages),
@@ -80,13 +76,13 @@ func main() {
 	s, err := scraper.NewScraper(cfg)
 	if err != nil {
 		slog.Error("initialising scraper", slog.Any("error", err))
-		os.Exit(1)
+		return 1
 	}
 
-	writer, err := createWriter(cfg.OutputFormat, cfg.OutputFile)
+	writer, err := createWriter(cfg.OutputFormat, outputFile)
 	if err != nil {
 		slog.Error("creating writer", slog.Any("error", err))
-		os.Exit(1)
+		return 1
 	}
 	defer func() {
 		if err := writer.Close(); err != nil {
@@ -94,8 +90,6 @@ func main() {
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutdown signal received, waiting for in-flight work to finish")
@@ -103,16 +97,7 @@ func main() {
 
 	var metricsServer *http.Server
 	if cfg.MetricsAddr != "" && s.Metrics != nil {
-		metricsServer = &http.Server{
-			Addr:    cfg.MetricsAddr,
-			Handler: promhttp.HandlerFor(s.Metrics.Registry, promhttp.HandlerOpts{}),
-		}
-		go func() {
-			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("metrics server failed", slog.Any("error", err))
-			}
-		}()
-		slog.Info("metrics server enabled", slog.String("addr", cfg.MetricsAddr))
+		metricsServer = startMetricsServer(ctx, cfg.MetricsAddr, s.Metrics.Registry)
 	}
 
 	p := pipeline.NewPipeline(ctx, writer, cfg)
@@ -125,39 +110,95 @@ func main() {
 	result, err := s.Run(ctx, p)
 	if err != nil {
 		slog.Error("scraping failed", slog.Any("error", err))
-		os.Exit(1)
+		shutdownMetricsServer(metricsServer, 5*time.Second)
+		return 1
 	}
 
 	if err := p.Close(); err != nil {
 		slog.Error("pipeline shutdown failed", slog.Any("error", err))
-		os.Exit(1)
+		shutdownMetricsServer(metricsServer, 5*time.Second)
+		return 1
 	}
 
 	if err := writer.Validate(); err != nil {
 		slog.Error("output validation failed", slog.Any("error", err))
-		os.Exit(1)
+		shutdownMetricsServer(metricsServer, 5*time.Second)
+		return 1
 	}
 
-	if metricsServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
-			slog.Error("metrics server shutdown failed", slog.Any("error", err))
-		}
-		cancel()
-	}
+	shutdownMetricsServer(metricsServer, 5*time.Second)
 
 	metrics := p.GetMetrics()
 	duration := time.Since(startTime)
-	totalItems := int64(0)
-	if processed, ok := metrics["processed_books"].(int64); ok {
-		totalItems = processed
-	}
+	totalItems := metrics.Processed
 	itemsPerSec := 0.0
 	if duration.Seconds() > 0 {
 		itemsPerSec = float64(totalItems) / duration.Seconds()
 	}
 
-	printSummary(result, duration, itemsPerSec, cfg.OutputFile, metrics)
+	printSummary(os.Stdout, result, duration, itemsPerSec, outputFile, metrics)
+	return 0
+}
+
+// startMetricsServer launches the Prometheus metrics HTTP server.
+// It returns nil when addr is empty (metrics disabled).
+func startMetricsServer(ctx context.Context, addr string, registry *prometheus.Registry) *http.Server {
+	_ = ctx
+	if addr == "" {
+		return nil
+	}
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("metrics server failed", slog.Any("error", err))
+		}
+	}()
+	slog.Info("metrics server enabled", slog.String("addr", addr))
+	return srv
+}
+
+// shutdownMetricsServer gracefully shuts down the metrics server.
+// It is a no-op when srv is nil.
+func shutdownMetricsServer(srv *http.Server, timeout time.Duration) {
+	if srv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("metrics server shutdown failed", slog.Any("error", err))
+	}
+}
+
+// flagDefaults computes flag default values, applying environment overrides.
+// It returns an error (matching the original stderr message) when an env var is
+// present but cannot be parsed.
+func flagDefaults() (pagesDefault, parallelDefault int, outputDefault, metricsDefault string, err error) {
+	defaultCfg := config.DefaultConfig()
+	pagesDefault = defaultCfg.MaxPages
+	if value, ok, parseErr := config.EnvInt("SCRAPER_PAGES"); parseErr != nil {
+		return 0, 0, "", "", fmt.Errorf("invalid SCRAPER_PAGES: %v", parseErr)
+	} else if ok {
+		pagesDefault = value
+	}
+	parallelDefault = defaultCfg.Parallelism
+	if value, ok, parseErr := config.EnvInt("SCRAPER_PARALLEL"); parseErr != nil {
+		return 0, 0, "", "", fmt.Errorf("invalid SCRAPER_PARALLEL: %v", parseErr)
+	} else if ok {
+		parallelDefault = value
+	}
+	outputDefault = defaultCfg.OutputFile
+	if value, ok := config.EnvString("SCRAPER_OUTPUT"); ok {
+		outputDefault = value
+	}
+	metricsDefault = defaultCfg.MetricsAddr
+	if value, ok := config.EnvString("SCRAPER_METRICS_ADDR"); ok {
+		metricsDefault = value
+	}
+	return pagesDefault, parallelDefault, outputDefault, metricsDefault, nil
 }
 
 func buildConfigFromFlags(baseURL string, maxPages, parallelism, delayMs, randomDelayMs, maxRetries, retryBackoffMs, retryBackoffMaxMs int, respectRobots bool, outputFile, outputFormat string, verbose bool, metricsAddr string) *config.Config {
@@ -192,35 +233,32 @@ func createWriter(format, filename string) (pipeline.OutputWriter, error) {
 	}
 }
 
-func printSummary(result *models.ScraperResult, duration time.Duration, itemsPerSec float64, outputFile string, metrics map[string]interface{}) {
+func printSummary(w io.Writer, result *models.ScraperResult, duration time.Duration, itemsPerSec float64, outputFile string, metrics pipeline.PipelineStats) {
 	separator := "--------------------------------------------------"
-	fmt.Println("\n" + separator)
-	fmt.Println("Scrape complete")
+	fmt.Fprintln(w, "\n"+separator)
+	fmt.Fprintln(w, "Scrape complete")
 
-	totalItems := int64(0)
-	if processed, ok := metrics["processed_books"].(int64); ok {
-		totalItems = processed
-	}
+	totalItems := metrics.Processed
 
-	fmt.Printf("  Total items:   %d\n", totalItems)
+	fmt.Fprintf(w, "  Total items:   %d\n", totalItems)
 	successRate := 0.0
 	if result.RequestCount > 0 {
 		successRate = float64(result.RequestCount-result.ErrorCount) / float64(result.RequestCount) * 100
 	}
-	fmt.Printf("  Success rate:  %.2f%%\n", successRate)
-	fmt.Printf("  Errors:        %d\n", result.ErrorCount)
-	fmt.Printf("  Retries:       %d\n", result.RetryCount)
-	fmt.Printf("  Failed URLs:   %d\n", len(result.FailedURLs))
+	fmt.Fprintf(w, "  Success rate:  %.2f%%\n", successRate)
+	fmt.Fprintf(w, "  Errors:        %d\n", result.ErrorCount)
+	fmt.Fprintf(w, "  Retries:       %d\n", result.RetryCount)
+	fmt.Fprintf(w, "  Failed URLs:   %d\n", len(result.FailedURLs))
 	if len(result.ErrorsByType) > 0 {
-		fmt.Printf("  Error types:   %v\n", result.ErrorsByType)
+		fmt.Fprintf(w, "  Error types:   %v\n", result.ErrorsByType)
 	}
-	if valErrors, ok := metrics["validation_errors"].(map[string]int); ok && len(valErrors) > 0 {
-		fmt.Printf("  Validation:    %v\n", valErrors)
+	if valErrors := metrics.ValidationErrors; len(valErrors) > 0 {
+		fmt.Fprintf(w, "  Validation:    %v\n", valErrors)
 	}
-	fmt.Printf("  Duration:      %v\n", duration)
-	fmt.Printf("  Items/sec:     %.2f\n", itemsPerSec)
-	fmt.Printf("  Output file:   %s\n", outputFile)
-	fmt.Println(separator)
+	fmt.Fprintf(w, "  Duration:      %v\n", duration)
+	fmt.Fprintf(w, "  Items/sec:     %.2f\n", itemsPerSec)
+	fmt.Fprintf(w, "  Output file:   %s\n", outputFile)
+	fmt.Fprintln(w, separator)
 }
 
 func newLogger(verbose bool) (*slog.Logger, *slog.LevelVar) {
