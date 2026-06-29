@@ -1,0 +1,26 @@
+# Version control
+.git/
+.gitignore
+
+# Build artifacts & runtime output
+output/
+*.out
+*.prof
+coverage.out
+
+# Documentation (not needed at runtime)
+*.md
+docs/
+
+# Container metadata (avoid sending into the build context)
+Dockerfile
+.dockerignore
+.docker/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Local environment
+.env*
