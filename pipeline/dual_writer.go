@@ -27,7 +27,7 @@ func NewDualWriter(csvFilename, jsonFilename string) (*DualWriter, error) {
 	// Create JSON writer
 	jsonWriter, err := NewJSONWriter(jsonFilename)
 	if err != nil {
-		csvWriter.Close()
+		_ = csvWriter.Close()
 		return nil, fmt.Errorf("failed to create JSON writer: %w", err)
 	}
 
@@ -60,7 +60,11 @@ func (dw *DualWriter) Write(books []*models.Book) error {
 	return nil
 }
 
-// Close closes both writers
+// Close closes both writers. Close is best-effort: each underlying writer closes
+// (and atomically renames) independently, so if one writer's Close fails after
+// the other succeeded, the successful file is already atomically renamed and the
+// caller should check the returned error. True cross-file atomicity is not
+// achievable without a coordinator.
 func (dw *DualWriter) Close() error {
 	dw.mu.Lock()
 	defer dw.mu.Unlock()
@@ -79,11 +83,6 @@ func (dw *DualWriter) Close() error {
 		return fmt.Errorf("multiple errors: %v", errs)
 	}
 
-	return nil
-}
-
-// Rollback is a placeholder for future transactional support.
-func (dw *DualWriter) Rollback() error {
 	return nil
 }
 
