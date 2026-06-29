@@ -101,6 +101,12 @@ make scrape PAGES=10 PARALLEL=4          # Quick test run
 make scrape FORMAT=json PAGES=100        # JSONL-only, 100 pages
 ```
 
+**Robots.txt Compliance**
+Robots.txt compliance is **enabled by default**. To disable it (e.g., for a target that permits unrestricted scraping), pass the flag explicitly:
+```bash
+make scrape ARGS='-respect-robots=false'
+```
+
 **With Prometheus Metrics**
 ```bash
 make scrape ARGS='-metrics-addr :9090'

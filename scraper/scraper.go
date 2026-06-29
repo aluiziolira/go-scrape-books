@@ -134,7 +134,7 @@ func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
 	return s.Run(context.Background(), p)
 }
 
-func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
+func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) { //nolint:gocyclo // registers one branch per colly lifecycle callback
 	s.handlersOnce.Do(func() {
 		s.collector.OnRequest(func(r *colly.Request) {
 			r.Ctx.Put("start", time.Now())

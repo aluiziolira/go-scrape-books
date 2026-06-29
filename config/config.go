@@ -46,7 +46,7 @@ func DefaultConfig() *Config {
 		OutputFormat:       "csv",
 		UserAgent:          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
 		Verbose:            false,
-		RespectRobotsTxt:   false,
+		RespectRobotsTxt:   true,
 		PipelineBufferSize: 512,
 		BatchSize:          64,
 		DedupeMaxSize:      100000,
@@ -55,7 +55,7 @@ func DefaultConfig() *Config {
 }
 
 // Validate ensures all configuration values are coherent.
-func (c *Config) Validate() error {
+func (c *Config) Validate() error { //nolint:gocyclo // inherent branchiness from validating ~17 independent fields
 	if c.BaseURL == "" {
 		return fmt.Errorf("base URL cannot be empty")
 	}
