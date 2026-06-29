@@ -1,0 +1,49 @@
+version: "2"
+
+run:
+  timeout: 3m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+    - gocyclo
+    - ineffassign
+    - misspell
+    - unused
+
+  settings:
+    gocyclo:
+      min-complexity: 15
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    revive:
+      severity: warning
+      rules:
+        - name: exported
+          disabled: true
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - revive
+      - path: cmd/scraper/main\.go
+        linters:
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
