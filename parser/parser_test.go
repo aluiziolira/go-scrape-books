@@ -205,3 +205,51 @@ func TestNormalizeAvailability(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePrice(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    float64
+		wantErr bool
+	}{
+		{
+			name:  "currency with decimals",
+			input: "£12.34",
+			want:  12.34,
+		},
+		{
+			name:  "zero price",
+			input: "£0.00",
+			want:  0.0,
+		},
+		{
+			name:  "thousands separator stripped",
+			input: "£1,234.56",
+			want:  1234.56,
+		},
+		{
+			name:    "empty string",
+			input:   "",
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric text",
+			input:   "POA",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParsePrice(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParsePrice(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("ParsePrice(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}

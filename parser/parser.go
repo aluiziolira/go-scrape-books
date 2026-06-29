@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/aluiziolira/go-scrape-books/models"
@@ -39,6 +40,19 @@ func NormalizePrice(price string) string {
 	price = strings.TrimSpace(price)
 	price = strings.ReplaceAll(price, "£", "")
 	return strings.TrimSpace(price)
+}
+
+// ParsePrice extracts the numeric value from a raw price string.
+// Currency symbols, thousands separators and whitespace are stripped so that
+// "£1,234.56" becomes 1234.56.
+func ParsePrice(raw string) (float64, error) {
+	cleaned := strings.Map(func(r rune) rune {
+		if (r >= '0' && r <= '9') || r == '.' {
+			return r
+		}
+		return -1
+	}, raw)
+	return strconv.ParseFloat(cleaned, 64)
 }
 
 // NormalizeAvailability trims spacing from the availability text.

@@ -120,10 +120,7 @@ func TestPipelineProcessValidationAndDedup(t *testing.T) {
 	}
 
 	metrics := p.GetMetrics()
-	validation, ok := metrics["validation_errors"].(map[string]int)
-	if !ok {
-		t.Fatalf("expected validation errors map")
-	}
+	validation := metrics.ValidationErrors
 	if validation["invalid_record"] == 0 {
 		t.Fatalf("expected invalid_record validation error")
 	}

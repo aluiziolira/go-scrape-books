@@ -124,11 +124,7 @@ func (s *Scraper) Run(ctx context.Context, p *pipeline.Pipeline) (*models.Scrape
 		PageCount:    int(atomic.LoadInt64(&s.pageCount)),
 	}
 
-	if metrics := p.GetMetrics(); metrics != nil {
-		if processed, ok := metrics["processed_books"].(int64); ok {
-			result.TotalCount = int(processed)
-		}
-	}
+	result.TotalCount = int(p.GetMetrics().Processed)
 
 	return result, nil
 }
