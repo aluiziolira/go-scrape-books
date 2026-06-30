@@ -38,7 +38,8 @@ type Scraper struct {
 	failedURLs   []string
 	errorsByType map[string]int
 
-	handlersOnce sync.Once
+	sinkErrLogged atomic.Bool
+	handlersOnce  sync.Once
 }
 
 // NewScraper builds a scraper instance configured from cfg.
@@ -212,10 +213,16 @@ func (s *Scraper) configureHandlers(ctx context.Context, sink Sink) { //nolint:g
 				s.Metrics.IncItems()
 			}
 			if err := sink.Process(book); err != nil {
-				if ctx.Err() != nil {
-					slog.Debug("sink process error during shutdown", slog.Any("error", err))
+				// Sink is an opaque interface, so the scraper can't tell a benign
+				// "shutting down" rejection from a genuine failure (e.g. a write
+				// error). Surface the first occurrence loudly and the rest at
+				// debug, instead of guessing from ctx state and risking either a
+				// real failure going unlogged or a burst of expected shutdown
+				// rejections flooding the logs.
+				if s.sinkErrLogged.CompareAndSwap(false, true) {
+					slog.Error("sink rejected book; further occurrences logged at debug", slog.Any("error", err))
 				} else {
-					slog.Error("sink process error", slog.Any("error", err))
+					slog.Debug("sink process error", slog.Any("error", err))
 				}
 			}
 		})
