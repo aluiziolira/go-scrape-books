@@ -365,14 +365,6 @@ func (rm *retryManager) Schedule(url string) bool {
 		return false
 	}
 
-	if rm.ctx != nil {
-		select {
-		case <-rm.ctx.Done():
-			return false
-		default:
-		}
-	}
-
 	rm.mu.Lock()
 
 	if rm.stopped {
