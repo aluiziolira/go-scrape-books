@@ -21,7 +21,6 @@ type ScraperResult struct {
 	Books        []*Book
 	StartTime    time.Time
 	EndTime      time.Time
-	TotalCount   int
 	ErrorCount   int
 	FailedURLs   []string
 	ErrorsByType map[string]int

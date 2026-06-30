@@ -15,9 +15,15 @@ import (
 
 	"github.com/aluiziolira/go-scrape-books/config"
 	"github.com/aluiziolira/go-scrape-books/models"
-	"github.com/aluiziolira/go-scrape-books/pipeline"
 	"github.com/gocolly/colly/v2"
 )
+
+// Sink receives books extracted from the page as they are scraped. It is
+// implemented by pipeline.Pipeline; the scraper depends only on this narrow
+// interface so it never needs to import the pipeline package.
+type Sink interface {
+	Process(books ...*models.Book) error
+}
 
 // Scraper wraps the colly collector and retry logic for the demo target.
 type Scraper struct {
@@ -85,13 +91,13 @@ func NewScraper(cfg *config.Config) (*Scraper, error) {
 	return s, nil
 }
 
-// Run starts the crawl and streams items through the pipeline.
-func (s *Scraper) Run(ctx context.Context, p *pipeline.Pipeline) (*models.ScraperResult, error) {
+// Run starts the crawl and streams extracted books into sink.
+func (s *Scraper) Run(ctx context.Context, sink Sink) (*models.ScraperResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.retry.SetContext(ctx)
-	s.configureHandlers(ctx, p)
+	s.configureHandlers(ctx, sink)
 
 	start := time.Now()
 	done := make(chan struct{})
@@ -124,17 +130,10 @@ func (s *Scraper) Run(ctx context.Context, p *pipeline.Pipeline) (*models.Scrape
 		PageCount:    int(atomic.LoadInt64(&s.pageCount)),
 	}
 
-	result.TotalCount = int(p.GetMetrics().Processed)
-
 	return result, nil
 }
 
-// Scrape is a compatibility wrapper for older callers.
-func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
-	return s.Run(context.Background(), p)
-}
-
-func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) { //nolint:gocyclo // registers one branch per colly lifecycle callback
+func (s *Scraper) configureHandlers(ctx context.Context, sink Sink) { //nolint:gocyclo // registers one branch per colly lifecycle callback
 	s.handlersOnce.Do(func() {
 		s.collector.OnRequest(func(r *colly.Request) {
 			r.Ctx.Put("start", time.Now())
@@ -214,8 +213,12 @@ func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 			if s.Metrics != nil {
 				s.Metrics.IncItems()
 			}
-			if err := p.Process(book); err != nil && err != pipeline.ErrPipelineClosed {
-				slog.Error("pipeline process error", slog.Any("error", err))
+			if err := sink.Process(book); err != nil {
+				if ctx.Err() != nil {
+					slog.Debug("sink process error during shutdown", slog.Any("error", err))
+				} else {
+					slog.Error("sink process error", slog.Any("error", err))
+				}
 			}
 		})
 
