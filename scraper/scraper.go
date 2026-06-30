@@ -2,22 +2,26 @@ package scraper
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/aluiziolira/go-scrape-books/config"
 	"github.com/aluiziolira/go-scrape-books/models"
-	"github.com/aluiziolira/go-scrape-books/pipeline"
 	"github.com/gocolly/colly/v2"
 )
+
+// Sink receives books extracted from the page as they are scraped. It is
+// implemented by pipeline.Pipeline; the scraper depends only on this narrow
+// interface so it never needs to import the pipeline package.
+type Sink interface {
+	Process(books ...*models.Book) error
+}
 
 // Scraper wraps the colly collector and retry logic for the demo target.
 type Scraper struct {
@@ -34,7 +38,8 @@ type Scraper struct {
 	failedURLs   []string
 	errorsByType map[string]int
 
-	handlersOnce sync.Once
+	sinkErrLogged atomic.Bool
+	handlersOnce  sync.Once
 }
 
 // NewScraper builds a scraper instance configured from cfg.
@@ -85,13 +90,13 @@ func NewScraper(cfg *config.Config) (*Scraper, error) {
 	return s, nil
 }
 
-// Run starts the crawl and streams items through the pipeline.
-func (s *Scraper) Run(ctx context.Context, p *pipeline.Pipeline) (*models.ScraperResult, error) {
+// Run starts the crawl and streams extracted books into sink.
+func (s *Scraper) Run(ctx context.Context, sink Sink) (*models.ScraperResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.retry.SetContext(ctx)
-	s.configureHandlers(ctx, p)
+	s.configureHandlers(ctx, sink)
 
 	start := time.Now()
 	done := make(chan struct{})
@@ -124,17 +129,10 @@ func (s *Scraper) Run(ctx context.Context, p *pipeline.Pipeline) (*models.Scrape
 		PageCount:    int(atomic.LoadInt64(&s.pageCount)),
 	}
 
-	result.TotalCount = int(p.GetMetrics().Processed)
-
 	return result, nil
 }
 
-// Scrape is a compatibility wrapper for older callers.
-func (s *Scraper) Scrape(p *pipeline.Pipeline) (*models.ScraperResult, error) {
-	return s.Run(context.Background(), p)
-}
-
-func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) { //nolint:gocyclo // registers one branch per colly lifecycle callback
+func (s *Scraper) configureHandlers(ctx context.Context, sink Sink) { //nolint:gocyclo // registers one branch per colly lifecycle callback
 	s.handlersOnce.Do(func() {
 		s.collector.OnRequest(func(r *colly.Request) {
 			r.Ctx.Put("start", time.Now())
@@ -214,8 +212,18 @@ func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 			if s.Metrics != nil {
 				s.Metrics.IncItems()
 			}
-			if err := p.Process(book); err != nil && err != pipeline.ErrPipelineClosed {
-				slog.Error("pipeline process error", slog.Any("error", err))
+			if err := sink.Process(book); err != nil {
+				// Sink is an opaque interface, so the scraper can't tell a benign
+				// "shutting down" rejection from a genuine failure (e.g. a write
+				// error). Surface the first occurrence loudly and the rest at
+				// debug, instead of guessing from ctx state and risking either a
+				// real failure going unlogged or a burst of expected shutdown
+				// rejections flooding the logs.
+				if s.sinkErrLogged.CompareAndSwap(false, true) {
+					slog.Error("sink rejected book; further occurrences logged at debug", slog.Any("error", err))
+				} else {
+					slog.Debug("sink process error", slog.Any("error", err))
+				}
 			}
 		})
 
@@ -236,47 +244,6 @@ func (s *Scraper) configureHandlers(ctx context.Context, p *pipeline.Pipeline) {
 	})
 }
 
-func extractBook(e *colly.HTMLElement) *models.Book {
-	title := strings.TrimSpace(e.ChildAttr("h3 a", "title"))
-	if title == "" {
-		return nil
-	}
-
-	href := e.ChildAttr("h3 a", "href")
-	if href == "" {
-		return nil
-	}
-
-	bookURL := e.Request.AbsoluteURL(href)
-	priceText := strings.TrimSpace(e.ChildText("p.price_color"))
-
-	ratingClass := e.ChildAttr("p.star-rating", "class")
-	ratingText := ""
-	if ratingClass != "" {
-		parts := strings.Fields(ratingClass)
-		if len(parts) > 1 {
-			ratingText = parts[1]
-		}
-	}
-
-	availability := strings.TrimSpace(e.ChildText("p.instock.availability"))
-	if availability == "" {
-		availability = strings.TrimSpace(e.ChildText("p.availability"))
-	}
-
-	imageURL := e.Request.AbsoluteURL(e.ChildAttr("img", "src"))
-
-	return &models.Book{
-		Title:        title,
-		Price:        priceText,
-		RatingText:   ratingText,
-		Availability: availability,
-		ImageURL:     imageURL,
-		URL:          bookURL,
-		ScrapedAt:    time.Now(),
-	}
-}
-
 func (s *Scraper) snapshotFailedURLs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -293,188 +260,4 @@ func (s *Scraper) snapshotErrors() map[string]int {
 		out[k] = v
 	}
 	return out
-}
-
-func classifyError(err error, statusCode int) error {
-	if err == nil && statusCode == 0 {
-		return nil
-	}
-
-	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrTimeout{Err: err}
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return ErrTimeout{Err: err}
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return ErrConnection{Err: err}
-	}
-
-	if statusCode != 0 {
-		wrapped := err
-		if wrapped == nil {
-			wrapped = fmt.Errorf("http status %d", statusCode)
-		}
-		switch statusCode {
-		case http.StatusForbidden:
-			return ErrForbidden{Err: wrapped}
-		case http.StatusNotFound:
-			return ErrNotFound{Err: wrapped}
-		case http.StatusTooManyRequests:
-			return ErrRateLimited{Err: wrapped}
-		}
-	}
-
-	if err == nil {
-		return nil
-	}
-	return err
-}
-
-type retryManager struct {
-	collector *colly.Collector
-	cfg       *config.Config
-	metrics   *Metrics
-	ctx       context.Context
-
-	mu           sync.Mutex
-	attempts     map[string]int
-	timers       map[string]*time.Timer
-	totalRetries int
-	stopped      bool
-}
-
-func newRetryManager(collector *colly.Collector, cfg *config.Config, metrics *Metrics) *retryManager {
-	return &retryManager{
-		collector: collector,
-		cfg:       cfg,
-		attempts:  make(map[string]int),
-		timers:    make(map[string]*time.Timer),
-		metrics:   metrics,
-		ctx:       context.Background(),
-	}
-}
-
-func (rm *retryManager) Schedule(url string) bool {
-	if rm.cfg.MaxRetries == 0 {
-		return false
-	}
-
-	if rm.ctx != nil {
-		select {
-		case <-rm.ctx.Done():
-			return false
-		default:
-		}
-	}
-
-	rm.mu.Lock()
-
-	if rm.stopped {
-		rm.mu.Unlock()
-		return false
-	}
-	if rm.ctx != nil && rm.ctx.Err() != nil {
-		rm.mu.Unlock()
-		return false
-	}
-
-	attempt := rm.attempts[url]
-	if attempt >= rm.cfg.MaxRetries {
-		rm.mu.Unlock()
-		return false
-	}
-
-	attempt++
-	rm.attempts[url] = attempt
-	rm.totalRetries++
-	if rm.metrics != nil {
-		rm.metrics.IncRetries()
-	}
-
-	delay := rm.backoff(attempt)
-	rm.resetTimerLocked(url)
-	rm.timers[url] = time.AfterFunc(delay, func() {
-		rm.fireRetry(url)
-	})
-	rm.mu.Unlock()
-	return true
-}
-
-func (rm *retryManager) backoff(attempt int) time.Duration {
-	if attempt <= 0 {
-		attempt = 1
-	}
-
-	base := rm.cfg.RetryBackoff
-	if base <= 0 {
-		base = 100 * time.Millisecond
-	}
-
-	delay := base * time.Duration(1<<(attempt-1))
-	if max := rm.cfg.RetryBackoffMax; max > 0 && delay > max {
-		delay = max
-	}
-	return delay
-}
-
-func (rm *retryManager) resetTimerLocked(url string) {
-	if timer, ok := rm.timers[url]; ok {
-		timer.Stop()
-		delete(rm.timers, url)
-	}
-}
-
-func (rm *retryManager) fireRetry(url string) {
-	rm.mu.Lock()
-	if rm.stopped {
-		rm.mu.Unlock()
-		return
-	}
-	ctx := rm.ctx
-	rm.mu.Unlock()
-
-	if ctx != nil && ctx.Err() != nil {
-		return
-	}
-	if err := rm.collector.Visit(url); err != nil {
-		slog.Debug("retry visit failed", slog.String("url", url), slog.Any("error", err))
-	}
-
-	rm.mu.Lock()
-	delete(rm.timers, url)
-	rm.mu.Unlock()
-}
-
-func (rm *retryManager) Stop() {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-
-	if rm.stopped {
-		return
-	}
-
-	rm.stopped = true
-	for url, timer := range rm.timers {
-		timer.Stop()
-		delete(rm.timers, url)
-	}
-}
-
-func (rm *retryManager) TotalRetries() int {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-	return rm.totalRetries
-}
-
-func (rm *retryManager) SetContext(ctx context.Context) {
-	rm.mu.Lock()
-	defer rm.mu.Unlock()
-	if ctx == nil {
-		rm.ctx = context.Background()
-		return
-	}
-	rm.ctx = ctx
 }
