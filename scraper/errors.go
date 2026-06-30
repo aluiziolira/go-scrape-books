@@ -1,8 +1,11 @@
 package scraper
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 )
 
 // ErrTimeout indicates a timeout while issuing a request.
@@ -95,4 +98,44 @@ func errorTypeLabel(err error) string {
 		return "rate_limited"
 	}
 	return "other"
+}
+
+// classifyError maps a raw colly error and HTTP status into one of the typed
+// errors above, so callers can branch on category without re-deriving it.
+func classifyError(err error, statusCode int) error {
+	if err == nil && statusCode == 0 {
+		return nil
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrTimeout{Err: err}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return ErrTimeout{Err: err}
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return ErrConnection{Err: err}
+	}
+
+	if statusCode != 0 {
+		wrapped := err
+		if wrapped == nil {
+			wrapped = fmt.Errorf("http status %d", statusCode)
+		}
+		switch statusCode {
+		case http.StatusForbidden:
+			return ErrForbidden{Err: wrapped}
+		case http.StatusNotFound:
+			return ErrNotFound{Err: wrapped}
+		case http.StatusTooManyRequests:
+			return ErrRateLimited{Err: wrapped}
+		}
+	}
+
+	if err == nil {
+		return nil
+	}
+	return err
 }
